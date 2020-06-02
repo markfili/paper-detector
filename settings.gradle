@@ -1,2 +1,4 @@
 rootProject.name='Paper Detector'
 include ':app'
+include ':opencv'
+project(':opencv').projectDir = new File(opencvsdk + '/sdk')
