@@ -341,12 +341,16 @@ class Contour() {
             this.contour = contour
             val convexHull = MatOfInt()
             Imgproc.convexHull(contour, convexHull)
-            val pointsOfHull = intsToPoints2f(contour, convexHull)
+            val pointsOfHull = intsToPoints(
+                contour,
+                convexHull,
+                ::MatOfPoint2f
+            )
             val approxPoly = MatOfPoint2f()
             Imgproc.approxPolyDP(pointsOfHull, approxPoly, epsilon, true)
             area = Imgproc.contourArea(approxPoly)
             corners = approxPoly.toList().size
-            hull = intsToPoints(contour, convexHull)
+            hull = intsToPoints(contour, convexHull, ::MatOfPoint)
         }
     }
 
@@ -354,19 +358,15 @@ class Contour() {
         return area > other.area
     }
 
-    private fun intsToPoints(contour: MatOfPoint, indexes: MatOfInt): MatOfPoint {
-        val arrIndex = indexes.toArray()
-        val arrContour = contour.toArray()
-        val arrPoints = arrayOfNulls<Point>(arrIndex.size)
-        for (i in arrIndex.indices) {
-            arrPoints[i] = arrContour[arrIndex[i]]
-        }
-        val hull = MatOfPoint()
-        hull.fromArray(*arrPoints)
-        return hull
+    fun notEmpty(): Boolean {
+        return !hull.empty() && !contour.empty()
     }
 
-    private fun intsToPoints2f(matOfPoint: MatOfPoint, matOfInt: MatOfInt): MatOfPoint2f {
+    private fun <T> intsToPoints(
+        matOfPoint: MatOfPoint,
+        matOfInt: MatOfInt,
+        matFactory: (Array<Point?>) -> T
+    ): T {
         val intsArray = matOfInt.toArray()
         val pointsArray = matOfPoint.toArray()
         val resultPointsArray = arrayOfNulls<Point>(intsArray.size)
@@ -374,12 +374,7 @@ class Contour() {
         for (index in intsArray.indices) {
             resultPointsArray[index] = pointsArray[intsArray[index]]
         }
-        val hull = MatOfPoint2f()
-        hull.fromArray(*resultPointsArray)
-        return hull
+        return matFactory(resultPointsArray)
     }
 
-    fun notEmpty(): Boolean {
-        return !hull.empty() && !contour.empty()
-    }
 }
