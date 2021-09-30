@@ -2,10 +2,13 @@ package hr.mfllipovic.paperdetector
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.SurfaceView
+import android.widget.SeekBar
+import android.widget.SeekBar.OnSeekBarChangeListener
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -18,29 +21,45 @@ import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 
 
-class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListener2 {
+class MainActivity : AppCompatActivity(), OpenCVCameraListener {
 
     companion object {
         private const val REQUEST_CODE_CAMERA_PERMISSION = 101
         private const val CANNY_LOWER_THRESHOLD: Double = 60.0
         private const val CANNY_UPPER_THRESHOLD: Double = 180.0
-        private const val BLUR_KERNEL_SIZE: Double = 3.0
+        private const val BLUR_KERNEL_SIZE: Double = 9.0
         private const val THRESHOLD_VALUE: Double = 190.0
         private val whiteColor: Scalar = Scalar(255.0, 255.0, 255.0)
-        private val greenColor: Scalar = Scalar(0.0, 255.0, 0.0)
+        private val blueColor: Scalar = Scalar(60.0, 60.0, 255.0)
+        private val green: Int = Color.parseColor("#006400")
     }
 
 
     private lateinit var mOpenCvCameraView: CameraBridgeViewBase
-    private lateinit var mIntermediateMat: Mat
     private lateinit var binding: ActivityMainBinding
+
+    private var drawContours = true
+    private var drawConvexHull = true
+    private var showProcessedImage = false
+    private var epsilon = 10.0
+    private var iterations = 3
+    private var threshold = THRESHOLD_VALUE
+    private var blurKernelSize = BLUR_KERNEL_SIZE
+    private var kSize = 5.0
+    private var cannyUpper = CANNY_UPPER_THRESHOLD
+    private var cannyLower = CANNY_LOWER_THRESHOLD
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        setupViews()
+        setupOpenCV()
+    }
+
+    private fun setupOpenCV() {
         val version = OpenCVLoader.OPENCV_VERSION
-        log("version: $version")
+        log("OpenCV version: $version")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             when {
@@ -48,24 +67,76 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
                     this,
                     Manifest.permission.CAMERA
                 ) == PackageManager.PERMISSION_GRANTED -> {
-                    // You can use the API that requires the permission.
                     activateOpenCVCameraView()
                 }
                 shouldShowRequestPermissionRationale(Manifest.permission.CAMERA) -> {
-                    // In an educational UI, explain to the user why your app requires this
-                    // permission for a specific feature to behave as expected. In this UI,
-                    // include a "cancel" or "no thanks" button that allows the user to
-                    // continue using your app without granting the permission.
+
                 }
                 else -> {
-                    // You can directly ask for the permission.
                     requestPermissions(
-                        arrayOf(Manifest.permission.CAMERA),
-                        REQUEST_CODE_CAMERA_PERMISSION
+                        arrayOf(Manifest.permission.CAMERA), REQUEST_CODE_CAMERA_PERMISSION
                     )
                 }
             }
         }
+    }
+
+    private fun setupViews() {
+        with(binding) {
+            epsilonValue.progress = epsilon.toInt()
+            iterationsValue.progress = iterations
+            thresholdValue.progress = threshold.toInt()
+            ksizeValue.progress = kSize.toInt()
+            cannyUpValue.progress = cannyUpper.toInt()
+            cannyDownValue.progress = cannyLower.toInt()
+            epsilonValue.setOnSeekBarChangeListener(object : SeekBarProgressListener() {
+                override fun onChange(progress: Int) {
+                    epsilon = progress.toDouble()
+                }
+            })
+            iterationsValue.setOnSeekBarChangeListener(object : SeekBarProgressListener() {
+                override fun onChange(progress: Int) {
+                    iterations = progress
+                }
+            })
+            thresholdValue.setOnSeekBarChangeListener(object : SeekBarProgressListener() {
+                override fun onChange(progress: Int) {
+                    threshold = progress.toDouble()
+                }
+            })
+            ksizeValue.setOnSeekBarChangeListener(object : SeekBarProgressListener() {
+                override fun onChange(progress: Int) {
+                    kSize = progress.toDouble() + 1
+                }
+            })
+            cannyUpValue.setOnSeekBarChangeListener(object : SeekBarProgressListener() {
+                override fun onChange(progress: Int) {
+                    cannyUpper = progress.toDouble()
+                    if (progress <= cannyLower) {
+                        cannyDownValue.progress = progress - 1
+                    }
+                }
+            })
+            cannyDownValue.setOnSeekBarChangeListener(object : SeekBarProgressListener() {
+                override fun onChange(progress: Int) {
+                    cannyLower = progress.toDouble()
+                    if (progress >= cannyUpper) {
+                        cannyUpValue.progress = progress + 1
+                    }
+                }
+            })
+            contours.setOnCheckedChangeListener { _, isChecked ->
+                drawContours = isChecked
+            }
+            convexHull.setOnCheckedChangeListener { _, isChecked ->
+                drawConvexHull = isChecked
+            }
+            previewType.setOnCheckedChangeListener { _, isChecked ->
+                showProcessedImage = isChecked
+            }
+
+        }
+
     }
 
     override fun onRequestPermissionsResult(
@@ -122,106 +193,100 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
         Log.i("MainActivity", message)
     }
 
-    override fun onCameraViewStarted(width: Int, height: Int) {
-        log("onCameraViewStarted")
-        mIntermediateMat = Mat()
-    }
-
-    override fun onCameraViewStopped() {
-        log("onCameraViewStopped")
-        // Explicitly deallocate Mats
-        mIntermediateMat.release()
-    }
-
     override fun onCameraFrame(inputFrame: CameraBridgeViewBase.CvCameraViewFrame?): Mat {
-        log("onCameraFrame")
-        val rgba = inputFrame!!.rgba()
+        val originalImage = inputFrame!!.rgba()
+        val convertedImage = inputFrame.gray()
+        flipImages(convertedImage, originalImage)
+        applyChangesToFrame(convertedImage)
+        val bestContour = findBestContour(convertedImage)
+        val finalImage = if (showProcessedImage) convertedImage else originalImage
+        drawContours(finalImage, bestContour)
+        drawOnScreen(finalImage, bestContour)
+        return finalImage
+    }
 
-        Core.flip(rgba, rgba, -1)
-//        frame = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-        Imgproc.cvtColor(rgba, mIntermediateMat, Imgproc.COLOR_BGR2GRAY)
-//        frame = cv.GaussianBlur(frame, (self.noise_kernel_size, self.noise_kernel_size), 0)
+    private fun flipImages(convertedImage: Mat?, originalImage: Mat?) {
+        Core.flip(convertedImage, convertedImage, -1)
+        Core.flip(originalImage, originalImage, -1)
+    }
+
+    private fun findBestContour(convertedImage: Mat?): Contour {
+        val contoursRaw = mutableListOf<MatOfPoint>()
+        Imgproc.findContours(
+            convertedImage, contoursRaw,
+            Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE
+        )
+
+        var bestContour = Contour()
+        contoursRaw.forEach {
+            Contour(it, epsilon).let { contour ->
+                if (contour.betterThan(bestContour)) {
+                    bestContour = contour
+                }
+            }
+        }
+        return bestContour
+    }
+
+    private fun drawContours(
+        finalImage: Mat?,
+        bestContour: Contour
+    ) {
+        if (bestContour.notEmpty()) {
+            if (drawConvexHull) {
+                Imgproc.drawContours(finalImage, mutableListOf(bestContour.hull), -1, blueColor, 12)
+            }
+            if (drawContours) {
+                Imgproc.drawContours(
+                    finalImage,
+                    mutableListOf(bestContour.contour),
+                    -1,
+                    whiteColor,
+                    5
+                )
+            }
+        }
+    }
+
+    private fun drawOnScreen(
+        finalImage: Mat,
+        bestContour: Contour
+    ) {
+        val imgSize = finalImage.size().area()
+        val isPaperPresent = (bestContour.area > (imgSize * 0.1)) && bestContour.corners == 4
+        runOnUiThread {
+            binding.paperDetectedValue.text = if (isPaperPresent) "Yes" else "No "
+            binding.cornersCountValue.text = "${bestContour.corners}"
+            binding.detectedLayout.setBackgroundColor(if (isPaperPresent) green else Color.BLACK)
+            binding.cornersLayout.setBackgroundColor(if (isPaperPresent) green else Color.BLACK)
+        }
+    }
+
+    private fun applyChangesToFrame(rgba: Mat?) {
         Imgproc.GaussianBlur(
-            mIntermediateMat,
-            mIntermediateMat,
-            Size(BLUR_KERNEL_SIZE, BLUR_KERNEL_SIZE),
+            rgba,
+            rgba,
+            Size(blurKernelSize, blurKernelSize),
             0.0
         )
         Imgproc.threshold(
-            mIntermediateMat,
-            mIntermediateMat,
-            THRESHOLD_VALUE,
+            rgba,
+            rgba,
+            threshold,
             255.0,
-            Imgproc.THRESH_OTSU
+            Imgproc.THRESH_TRUNC
         )
-
-        val kernel: Mat = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
+        val kernel: Mat = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(kSize, kSize))
         val anchor = Point(-1.0, -1.0)
-        val iterations = 2
-        Imgproc.dilate(mIntermediateMat, mIntermediateMat, kernel, anchor, iterations)
-        Imgproc.erode(mIntermediateMat, mIntermediateMat, kernel, anchor, iterations)
+        Imgproc.dilate(rgba, rgba, kernel, anchor, iterations)
+        Imgproc.erode(rgba, rgba, kernel, anchor, iterations)
 
         Imgproc.Canny(
-            mIntermediateMat,
-            mIntermediateMat,
-            CANNY_LOWER_THRESHOLD,
-            CANNY_UPPER_THRESHOLD
-        )
-
-        // find contours
-        val contours = mutableListOf<MatOfPoint>()
-        val hierarchy = Mat()
-        Imgproc.findContours(
-            mIntermediateMat, contours,
-            hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE
-        )
-        var bestContour = MatOfPoint()
-        var bestPaperArea = 0.0
-        var bestPaperCorners = 0
-        for (contour in contours) {
-            val hull = MatOfInt()
-            Imgproc.convexHull(contour, hull)
-            val epsilon = 3.0
-            val pointsOfHull = intsToPoints(contour, hull)
-            val hullApprox = MatOfPoint2f()
-            Imgproc.approxPolyDP(pointsOfHull, hullApprox, epsilon, true)
-
-            val hullApproxArea = Imgproc.contourArea(hullApprox)
-            if (hullApproxArea > bestPaperArea) {
-                bestPaperArea = hullApproxArea
-                bestPaperCorners = hullApprox.toList().size
-                bestContour = contour
-            }
-        }
-
-        val imgSize = rgba.size().area()
-        val isPaperPresent = (bestPaperArea > (imgSize * 0.1)) && (bestPaperCorners == 4)
-        Imgproc.putText(
             rgba,
-            "Paper detected: ${if (isPaperPresent) "Yes" else "No"}",
-            Point(10.0, 100.0),
-            Imgproc.FONT_HERSHEY_PLAIN,
-            7.0,
-            if (isPaperPresent) greenColor else whiteColor,
-            6
+            rgba,
+            cannyLower,
+            cannyUpper
         )
-        if (!bestContour.empty()) {
-            Imgproc.drawContours(rgba, mutableListOf(bestContour), -1, whiteColor, 10)
-        }
-        return rgba
-    }
-
-    fun intsToPoints(matOfPoint: MatOfPoint, matOfInt: MatOfInt): MatOfPoint2f {
-        val intsArray = matOfInt.toArray()
-        val pointsArray = matOfPoint.toArray()
-        val resultPointsArray = arrayOfNulls<Point>(intsArray.size)
-
-        for (index in intsArray.indices) {
-            resultPointsArray[index] = pointsArray[intsArray[index]]
-        }
-        val hull = MatOfPoint2f()
-        hull.fromArray(*resultPointsArray)
-        return hull
     }
 
     override fun onResume() {
@@ -250,18 +315,71 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
     }
 }
 
+abstract class SeekBarProgressListener : OnSeekBarChangeListener {
+    abstract fun onChange(progress: Int)
 
-class Contour(
-    var contour: MatOfPoint
-) {
-    var area: Double = Imgproc.contourArea(contour)
-    var boundingRect: Rect = Imgproc.boundingRect(contour)
+    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) =
+        onChange(progress)
 
-    fun percentOfBoxCovered(): Int {
-        val boxWidth = this.boundingRect.width
-        val boxHeight = this.boundingRect.height
-        val boundingBoxArea = boxWidth * boxHeight
-        val percentage = this.area / boundingBoxArea
-        return (percentage * 100).toInt()
+    override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+    override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+}
+
+interface OpenCVCameraListener : CameraBridgeViewBase.CvCameraViewListener2 {
+    override fun onCameraViewStarted(width: Int, height: Int) = Unit
+    override fun onCameraViewStopped() = Unit
+}
+
+class Contour() {
+    var hull: MatOfPoint = MatOfPoint()
+    var area: Double = 0.0
+    var corners: Int = 0
+    var contour: MatOfPoint = MatOfPoint()
+
+    constructor(contour: MatOfPoint, epsilon: Double) : this() {
+        if (!contour.empty()) {
+            this.contour = contour
+            val convexHull = MatOfInt()
+            Imgproc.convexHull(contour, convexHull)
+            val pointsOfHull = intsToPoints2f(contour, convexHull)
+            val approxPoly = MatOfPoint2f()
+            Imgproc.approxPolyDP(pointsOfHull, approxPoly, epsilon, true)
+            area = Imgproc.contourArea(approxPoly)
+            corners = approxPoly.toList().size
+            hull = intsToPoints(contour, convexHull)
+        }
+    }
+
+    fun betterThan(other: Contour): Boolean {
+        return area > other.area
+    }
+
+    private fun intsToPoints(contour: MatOfPoint, indexes: MatOfInt): MatOfPoint {
+        val arrIndex = indexes.toArray()
+        val arrContour = contour.toArray()
+        val arrPoints = arrayOfNulls<Point>(arrIndex.size)
+        for (i in arrIndex.indices) {
+            arrPoints[i] = arrContour[arrIndex[i]]
+        }
+        val hull = MatOfPoint()
+        hull.fromArray(*arrPoints)
+        return hull
+    }
+
+    private fun intsToPoints2f(matOfPoint: MatOfPoint, matOfInt: MatOfInt): MatOfPoint2f {
+        val intsArray = matOfInt.toArray()
+        val pointsArray = matOfPoint.toArray()
+        val resultPointsArray = arrayOfNulls<Point>(intsArray.size)
+
+        for (index in intsArray.indices) {
+            resultPointsArray[index] = pointsArray[intsArray[index]]
+        }
+        val hull = MatOfPoint2f()
+        hull.fromArray(*resultPointsArray)
+        return hull
+    }
+
+    fun notEmpty(): Boolean {
+        return !hull.empty() && !contour.empty()
     }
 }
